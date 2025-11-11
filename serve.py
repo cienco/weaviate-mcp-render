@@ -57,9 +57,27 @@ def _get_weaviate_api_key() -> str:
 def _connect():
     url = _get_weaviate_url()
     key = _get_weaviate_api_key()
+
+    # Costruisci gli header per REST **e** gRPC
+    headers = {}
+
+    # A) Chiave statica (se ce l’hai)
+    vertex_key = os.environ.get("VERTEX_APIKEY")
+    if vertex_key:
+        for k in ["X-Goog-Vertex-Api-Key", "X-Goog-Api-Key", "X-Palm-Api-Key", "X-Goog-Studio-Api-Key"]:
+            headers[k] = vertex_key
+
+    # B) OAuth (se usi il refresher con la SA)
+    # _VERTEX_HEADERS contiene almeno Authorization: Bearer <token> e X-Goog-Vertex-Api-Key=<token>
+    if not vertex_key and "_VERTEX_HEADERS" in globals() and _VERTEX_HEADERS:
+        headers.update(_VERTEX_HEADERS)
+
+    # Passali a **entrambi**: REST e gRPC
     client = weaviate.connect_to_weaviate_cloud(
         cluster_url=url,
         auth_credentials=Auth.api_key(key),
+        headers=headers or None,
+        grpc_headers=headers or None,   # <<--- questo è il pezzo mancante
     )
     return client
 
