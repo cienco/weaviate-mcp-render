@@ -58,28 +58,37 @@ def _connect():
     url = _get_weaviate_url()
     key = _get_weaviate_api_key()
 
-    # Costruisci gli header per REST **e** gRPC
+    # Costruisci gli header per REST (e li riuseremo per gRPC)
     headers = {}
-
-    # A) Chiave statica (se ce l’hai)
     vertex_key = os.environ.get("VERTEX_APIKEY")
     if vertex_key:
         for k in ["X-Goog-Vertex-Api-Key", "X-Goog-Api-Key", "X-Palm-Api-Key", "X-Goog-Studio-Api-Key"]:
             headers[k] = vertex_key
-
-    # B) OAuth (se usi il refresher con la SA)
-    # _VERTEX_HEADERS contiene almeno Authorization: Bearer <token> e X-Goog-Vertex-Api-Key=<token>
     if not vertex_key and "_VERTEX_HEADERS" in globals() and _VERTEX_HEADERS:
+        # contiene Authorization: Bearer <token> e X-Goog-Vertex-Api-Key=<token>
         headers.update(_VERTEX_HEADERS)
 
-    # Passali a **entrambi**: REST e gRPC
+    # Crea il client (solo headers REST qui)
     client = weaviate.connect_to_weaviate_cloud(
         cluster_url=url,
         auth_credentials=Auth.api_key(key),
         headers=headers or None,
-        grpc_headers=headers or None,   # ora supportato
     )
+
+    # --- PATCH per gRPC: inietta gli stessi headers nei metadata gRPC interni ---
+    try:
+        # alcune versioni espongono 'grpc_metadata', altre '_grpc_metadata'
+        conn = getattr(client, "_connection", None)
+        if conn is not None:
+            if hasattr(conn, "grpc_metadata") and isinstance(conn.grpc_metadata, dict):
+                conn.grpc_metadata.update(headers)
+            elif hasattr(conn, "_grpc_metadata") and isinstance(conn._grpc_metadata, dict):
+                conn._grpc_metadata.update(headers)
+    except Exception as e:
+        print("[weaviate] warning: non riesco a impostare gli header gRPC:", e)
+
     return client
+
 
 
 mcp = FastMCP("weaviate-mcp-http")
