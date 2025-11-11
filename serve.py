@@ -10,6 +10,35 @@ import weaviate
 from weaviate.classes.init import Auth
 from weaviate.classes.query import MetadataQuery
 
+# ---- GCP Project discovery from Service Account or ADC ----
+def _discover_gcp_project() -> Optional[str]:
+    # Priority: GOOGLE_APPLICATION_CREDENTIALS_JSON -> GOOGLE_APPLICATION_CREDENTIALS -> ADC default project
+    gac_json = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+    if gac_json:
+        try:
+            data = json.loads(gac_json)
+            if isinstance(data, dict) and data.get("project_id"):
+                return data["project_id"]
+        except Exception:
+            pass
+    gac_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if gac_path and os.path.exists(gac_path):
+        try:
+            with open(gac_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and data.get("project_id"):
+                return data["project_id"]
+        except Exception:
+            pass
+    try:
+        import google.auth
+        creds, proj = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        if proj:
+            return proj
+    except Exception:
+        pass
+    return None
+
 
 def _get_weaviate_url() -> str:
     url = os.environ.get("WEAVIATE_CLUSTER_URL") or os.environ.get("WEAVIATE_URL")
@@ -204,10 +233,10 @@ def _ensure_gcp_adc():
 def _vertex_embed(image_b64: Optional[str] = None, text: Optional[str] = None, model: str = "multimodalembedding@001"):
     if not _VERTEX_AVAILABLE:
         raise RuntimeError("google-cloud-aiplatform not installed")
-    project = os.environ.get("VERTEX_PROJECT")
+    project = _discover_gcp_project()
     location = os.environ.get("VERTEX_LOCATION", "us-central1")
     if not project:
-        raise RuntimeError("Set VERTEX_PROJECT and (optionally) VERTEX_LOCATION")
+        raise RuntimeError("Cannot determine GCP project_id from credentials; set GOOGLE_APPLICATION_CREDENTIALS(_JSON).")
     _ensure_gcp_adc()
     aiplatform.init(project=project, location=location)
     from vertexai.vision_models import MultiModalEmbeddingModel, Image
@@ -347,3 +376,31 @@ def _connect():
         headers=headers or None,
     )
     return client
+
+
+@mcp.tool
+def diagnose_vertex() -> Dict[str, Any]:
+    """
+    Report Vertex auth status: project id, whether OAuth refresher is on, header presence, and token expiry sample.
+    """
+    info: Dict[str, Any] = {}
+    info["project_id"] = _discover_gcp_project()
+    info["oauth_enabled"] = os.environ.get("VERTEX_USE_OAUTH", "").lower() in ("1", "true", "yes")
+    info["headers_active"] = bool(_VERTEX_HEADERS) if "_VERTEX_HEADERS" in globals() else False
+    try:
+        from google.oauth2 import service_account
+        from google.auth.transport.requests import Request
+        SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
+        gac_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        token_preview = None
+        expiry = None
+        if gac_path and os.path.exists(gac_path):
+            creds = service_account.Credentials.from_service_account_file(gac_path, scopes=SCOPES)
+            creds.refresh(Request())
+            token_preview = (creds.token[:12] + "...") if creds.token else None
+            expiry = getattr(creds, "expiry", None)
+        info["token_sample"] = token_preview
+        info["token_expiry"] = str(expiry) if expiry else None
+    except Exception as e:
+        info["token_error"] = str(e)
+    return info
