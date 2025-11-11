@@ -77,7 +77,7 @@ def _connect():
         cluster_url=url,
         auth_credentials=Auth.api_key(key),
         headers=headers or None,
-        grpc_headers=headers or None,   # <<--- questo è il pezzo mancante
+        grpc_headers=headers or None,   # ora supportato
     )
     return client
 
