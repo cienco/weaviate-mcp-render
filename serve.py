@@ -230,10 +230,22 @@ def _connect():
     try:
         conn = getattr(client, "_connection", None)
         if conn is not None:
-            if hasattr(conn, "grpc_metadata") and isinstance(conn.grpc_metadata, dict):
-                conn.grpc_metadata.update(grpc_meta)
-            elif hasattr(conn, "_grpc_metadata") and isinstance(conn._grpc_metadata, dict):
-                conn._grpc_metadata.update(grpc_meta)
+            if hasattr(conn, "grpc_metadata"):
+                if isinstance(conn.grpc_metadata, dict):
+                    conn.grpc_metadata.update(grpc_meta)
+                elif isinstance(conn.grpc_metadata, list):
+                    conn.grpc_metadata.extend(list(grpc_meta.items()))
+                else:
+                    conn.grpc_metadata = list(grpc_meta.items())
+            if hasattr(conn, "_grpc_metadata"):
+                if isinstance(conn._grpc_metadata, dict):
+                    conn._grpc_metadata.update(grpc_meta)
+                elif isinstance(conn._grpc_metadata, list):
+                    conn._grpc_metadata.extend(list(grpc_meta.items()))
+                else:
+                    conn._grpc_metadata = list(grpc_meta.items())
+            debug_meta = getattr(conn, "grpc_metadata", None)
+            print(f"[vertex-oauth] grpc metadata now: {debug_meta}")
     except Exception as e:
         print("[weaviate] warning: cannot set gRPC metadata headers:", e)
 
