@@ -492,7 +492,8 @@ def image_search_vertex(collection: str, image_b64: str, caption: Optional[str] 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "10000"))
-    path = os.environ.get("MCP_PATH", "/mcp/")
+    raw_path = os.environ.get("MCP_PATH", "/mcp/")
+    path = raw_path.rstrip("/") + "/"
     mcp.run(transport="http", host="0.0.0.0", port=port, path=path)
 
 
