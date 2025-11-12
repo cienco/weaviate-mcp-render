@@ -37,6 +37,7 @@ e usa gli strumenti:
 ## Autenticazione Vertex AI
 
 - Imposta `VERTEX_APIKEY` se vuoi usare una chiave statica (senza refresh).
+- In alternativa puoi passare un bearer già ottenuto via OAuth impostando `VERTEX_BEARER_TOKEN`.
 - Per OAuth con refresh automatico imposta `VERTEX_USE_OAUTH=true` e fornisci un **service account**:
   - `GOOGLE_APPLICATION_CREDENTIALS_JSON` con il JSON in chiaro **oppure**
   - `GOOGLE_APPLICATION_CREDENTIALS` con il path del file **oppure**

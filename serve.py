@@ -163,19 +163,23 @@ def _connect():
     # ----- Costruisci headers (REST) -----
     headers = {}
     vertex_key = os.environ.get("VERTEX_APIKEY")
+    vertex_bearer = os.environ.get("VERTEX_BEARER_TOKEN")
 
     # A) API key statica
-    if vertex_key:
+    # Token bearer for REST/grpc (può essere passato via env se già ottenuto esternamente)
+    if vertex_bearer:
+        headers.update(_build_vertex_header_map(vertex_bearer))
+        print("[vertex-oauth] using bearer token from VERTEX_BEARER_TOKEN env")
+
+    if vertex_key and not headers:
         for k in ["X-Goog-Vertex-Api-Key", "X-Goog-Api-Key", "X-Palm-Api-Key", "X-Goog-Studio-Api-Key"]:
             headers[k] = vertex_key
-        # Allinea anche le variabili d'ambiente richieste lato Weaviate
-        os.environ.setdefault("GOOGLE_APIKEY", vertex_key)
-        os.environ.setdefault("PALM_APIKEY", vertex_key)
+        print("[vertex-oauth] using static Vertex API key from VERTEX_APIKEY")
 
     # B) OAuth bearer dal refresher (se attivo): già include Authorization e X-Goog-Vertex-Api-Key
-    if not vertex_key and "_VERTEX_HEADERS" in globals() and _VERTEX_HEADERS:
+    if not headers and "_VERTEX_HEADERS" in globals() and _VERTEX_HEADERS:
         headers.update(_VERTEX_HEADERS)
-    elif not vertex_key:
+    elif not headers:
         # prova un refresh sincrono se possibile
         if _sync_refresh_vertex_token():
             headers.update(_VERTEX_HEADERS)
