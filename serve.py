@@ -11,6 +11,10 @@ import weaviate
 from weaviate.classes.init import Auth
 from weaviate.classes.query import MetadataQuery
 
+# In-memory stato Vertex
+_VERTEX_HEADERS: Dict[str, str] = {}
+_VERTEX_REFRESH_THREAD_STARTED = False
+
 # ---- GCP Project discovery from Service Account or ADC ----
 def _discover_gcp_project() -> Optional[str]:
     # Priority: GOOGLE_APPLICATION_CREDENTIALS_JSON -> GOOGLE_APPLICATION_CREDENTIALS -> ADC default project
@@ -76,6 +80,44 @@ def _resolve_service_account_path() -> Optional[str]:
             os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = candidate
             return candidate
     return None
+
+
+def _sync_refresh_vertex_token() -> bool:
+    """
+    Ottiene un token Vertex immediato usando le credenziali di servizio.
+    Restituisce True se il token è stato aggiornato con successo.
+    """
+    try:
+        from google.oauth2 import service_account
+        from google.auth.transport.requests import Request
+    except Exception as exc:
+        print(f"[vertex-oauth] sync refresh unavailable: {exc}")
+        return False
+    cred_path = _resolve_service_account_path()
+    if not cred_path or not os.path.exists(cred_path):
+        return False
+    try:
+        creds = service_account.Credentials.from_service_account_file(
+            cred_path,
+            scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        )
+        creds.refresh(Request())
+    except Exception as exc:
+        print(f"[vertex-oauth] sync refresh error: {exc}")
+        return False
+    token = creds.token
+    if not token:
+        return False
+    global _VERTEX_HEADERS
+    _VERTEX_HEADERS = {
+        "X-Goog-Vertex-Api-Key": token,
+        "x-goog-vertex-api-key": token,
+        "Authorization": f"Bearer {token}",
+        "authorization": f"Bearer {token}",
+    }
+    os.environ["GOOGLE_APIKEY"] = token
+    os.environ["PALM_APIKEY"] = token
+    return True
 
 
 def _connect():
@@ -381,46 +423,6 @@ if __name__ == "__main__":
 
 
 # ==== Vertex OAuth Token Refresher (optional) ====
-_VERTEX_HEADERS = {}
-_VERTEX_REFRESH_THREAD_STARTED = False
-
-def _sync_refresh_vertex_token() -> bool:
-    """
-    Fallback per ottenere un token Vertex immediato nel thread chiamante,
-    utile se la prima richiesta arriva prima che il refresher asincrono produca il token.
-    """
-    try:
-        from google.oauth2 import service_account
-        from google.auth.transport.requests import Request
-    except Exception as exc:
-        print(f"[vertex-oauth] sync refresh unavailable: {exc}")
-        return False
-    cred_path = _resolve_service_account_path()
-    if not cred_path or not os.path.exists(cred_path):
-        return False
-    try:
-        creds = service_account.Credentials.from_service_account_file(
-            cred_path,
-            scopes=["https://www.googleapis.com/auth/cloud-platform"],
-        )
-        creds.refresh(Request())
-    except Exception as exc:
-        print(f"[vertex-oauth] sync refresh error: {exc}")
-        return False
-    token = creds.token
-    if not token:
-        return False
-    global _VERTEX_HEADERS
-    _VERTEX_HEADERS = {
-        "X-Goog-Vertex-Api-Key": token,
-        "x-goog-vertex-api-key": token,
-        "Authorization": f"Bearer {token}",
-        "authorization": f"Bearer {token}",
-    }
-    os.environ["GOOGLE_APIKEY"] = token
-    os.environ["PALM_APIKEY"] = token
-    return True
-
 def _write_adc_from_json_env():
     gac_json = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
     gac_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
