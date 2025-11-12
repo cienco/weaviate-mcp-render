@@ -373,6 +373,66 @@ def image_search_vertex(collection: str, image_b64: str, caption: Optional[str] 
         return {"count": len(out), "results": out}
     finally:
         client.close()
+        
+
+@mcp.tool
+def diagnose_vertex() -> dict:
+    """
+    Mostra stato Vertex: project_id (se rilevabile), se OAuth refresher è attivo
+    e quali header auth verrebbero inviati (mascherati).
+    """
+    info = {}
+    # project_id dal file SA (se c'è)
+    try:
+        import os, json
+        proj = None
+        if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+            with open(os.environ["GOOGLE_APPLICATION_CREDENTIALS"], "r", encoding="utf-8") as f:
+                data = json.load(f)
+            proj = data.get("project_id")
+        elif os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON"):
+            data = json.loads(os.environ["GOOGLE_APPLICATION_CREDENTIALS_JSON"])
+            proj = data.get("project_id")
+        info["project_id"] = proj
+    except Exception as e:
+        info["project_id_error"] = str(e)
+
+    # oauth attivo?
+    info["oauth_enabled"] = os.environ.get("VERTEX_USE_OAUTH", "").lower() in ("1","true","yes")
+
+    # headers che useremmo (mascherati)
+    headers_preview = {}
+    try:
+        # ricostruisci come in _connect(): variabile VERTEX_APIKEY oppure token oauth
+        vkey = os.environ.get("VERTEX_APIKEY")
+        if vkey:
+            for k in ["X-Goog-Vertex-Api-Key","X-Goog-Api-Key","X-Palm-Api-Key","X-Goog-Studio-Api-Key"]:
+                headers_preview[k] = vkey
+        else:
+            # prova a leggere un token dall'env che il refresher mette (se lo avete salvato) oppure lascia vuoto
+            # se non disponibile, va bene: il tool è solo diagnostico, non bloccare
+            pass
+        # maschera
+        masked = {}
+        for k,v in headers_preview.items():
+            v = str(v)
+            masked[k] = (v[:6] + "..." + v[-4:]) if len(v) > 12 else "***masked***"
+        info["headers"] = masked
+    except Exception as e:
+        info["headers_error"] = str(e)
+
+    return info
+
+
+# Elenco tool registrati (debug)
+@mcp.custom_route("/tools", methods=["GET"])
+async def list_tools(_request):
+    try:
+        # FastMCP espone l'elenco tool in mcp.tools (dict: name -> Tool)
+        names = sorted(getattr(mcp, "tools").keys())
+        return JSONResponse({"tools": names})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 if __name__ == "__main__":
@@ -457,31 +517,3 @@ def _connect():
         headers=headers or None,
     )
     return client
-
-
-@mcp.tool
-def diagnose_vertex() -> Dict[str, Any]:
-    """
-    Report Vertex auth status: project id, whether OAuth refresher is on, header presence, and token expiry sample.
-    """
-    info: Dict[str, Any] = {}
-    info["project_id"] = _discover_gcp_project()
-    info["oauth_enabled"] = os.environ.get("VERTEX_USE_OAUTH", "").lower() in ("1", "true", "yes")
-    info["headers_active"] = bool(_VERTEX_HEADERS) if "_VERTEX_HEADERS" in globals() else False
-    try:
-        from google.oauth2 import service_account
-        from google.auth.transport.requests import Request
-        SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
-        gac_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-        token_preview = None
-        expiry = None
-        if gac_path and os.path.exists(gac_path):
-            creds = service_account.Credentials.from_service_account_file(gac_path, scopes=SCOPES)
-            creds.refresh(Request())
-            token_preview = (creds.token[:12] + "...") if creds.token else None
-            expiry = getattr(creds, "expiry", None)
-        info["token_sample"] = token_preview
-        info["token_expiry"] = str(expiry) if expiry else None
-    except Exception as e:
-        info["token_error"] = str(e)
-    return info
