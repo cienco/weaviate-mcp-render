@@ -58,58 +58,57 @@ def _connect():
     url = _get_weaviate_url()
     key = _get_weaviate_api_key()
 
-    # ----- Costruisci headers (REST) -----
+    # ===== Costruisci headers per REST =====
     headers = {}
-    vertex_key = os.environ.get("VERTEX_APIKEY")
 
-    # A) API key statica
-    if vertex_key:
+    # Se hai una API key statica:
+    vertex_api_key = os.environ.get("VERTEX_APIKEY")
+    if vertex_api_key:
+        # accettiamo tutti i nomi che WCS supporta (per sicurezza)
         for k in ["X-Goog-Vertex-Api-Key", "X-Goog-Api-Key", "X-Palm-Api-Key", "X-Goog-Studio-Api-Key"]:
-            headers[k] = vertex_key
+            headers[k] = vertex_api_key
 
-    # B) OAuth bearer dal refresher (se attivo): già include Authorization e X-Goog-Vertex-Api-Key
-    if not vertex_key and "_VERTEX_HEADERS" in globals() and _VERTEX_HEADERS:
-        headers.update(_VERTEX_HEADERS)
+    # Se usi l’OAuth refresher: _VERTEX_HEADERS contiene il token OAUTH “nudo”
+    # → esponilo come X-Goog-Vertex-Api-Key (come fai nel notebook)
+    if not vertex_api_key and "_VERTEX_HEADERS" in globals() and _VERTEX_HEADERS:
+        token = _VERTEX_HEADERS.get("X-Goog-Vertex-Api-Key") or _VERTEX_HEADERS.get("x-goog-vertex-api-key")
+        if not token:
+            # se nel refresher hai solo Authorization, estrai il token "nudo" dopo 'Bearer '
+            auth = _VERTEX_HEADERS.get("Authorization") or _VERTEX_HEADERS.get("authorization")
+            if auth and auth.lower().startswith("bearer "):
+                token = auth.split(" ", 1)[1].strip()
+        if token:
+            headers["X-Goog-Vertex-Api-Key"] = token
 
-    # ----- Crea client (headers per REST) -----
+    # ===== Crea client (headers per REST) =====
     client = weaviate.connect_to_weaviate_cloud(
-        cluster_url=url,
-        auth_credentials=Auth.api_key(key),
-        headers=headers or None,
+        cluster_url=url,                       # come nel tuo notebook: host del cluster
+        auth_credentials=Auth.api_key(key),    # admin/tenant key WCS
+        headers=headers or None,               # header REST
     )
 
-    # ----- Inietta metadata gRPC (chiavi *minuscole*) -----
-    # gRPC richiede lower-case ASCII per i metadata header
+    # ===== Inietta metadata gRPC (chiavi minuscole) =====
     grpc_meta = {}
     for k, v in (headers or {}).items():
-        kk = k.lower()
-        grpc_meta[kk] = v
+        grpc_meta[k.lower()] = v
+    # fallback: se per caso hai Authorization nel refresher, passa anche quello in gRPC
+    if "_VERTEX_HEADERS" in globals() and _VERTEX_HEADERS:
+        auth = _VERTEX_HEADERS.get("Authorization") or _VERTEX_HEADERS.get("authorization")
+        if auth:
+            grpc_meta.setdefault("authorization", auth)
 
-    # Safety: assicurati che almeno una di queste chiavi sia presente in minuscolo
-    if vertex_key:
-        for kk in ["x-goog-vertex-api-key", "x-goog-api-key", "x-palm-api-key", "x-goog-studio-api-key"]:
-            grpc_meta.setdefault(kk, vertex_key)
-    else:
-        # se stai usando OAuth, assicurati che 'authorization' sia presente
-        if "authorization" not in grpc_meta and "_VERTEX_HEADERS" in globals() and _VERTEX_HEADERS:
-            auth = _VERTEX_HEADERS.get("Authorization") or _VERTEX_HEADERS.get("authorization")
-            if auth:
-                grpc_meta["authorization"] = auth
-
-    # Scrivi nei campi interni compatibili con le varie minor del client
     try:
         conn = getattr(client, "_connection", None)
         if conn is not None:
+            # copriamo le varianti del client v4
             if hasattr(conn, "grpc_metadata") and isinstance(conn.grpc_metadata, dict):
                 conn.grpc_metadata.update(grpc_meta)
             elif hasattr(conn, "_grpc_metadata") and isinstance(conn._grpc_metadata, dict):
                 conn._grpc_metadata.update(grpc_meta)
     except Exception as e:
-        print("[weaviate] warning: cannot set gRPC metadata headers:", e)
+        print("[weaviate] warn: cannot set gRPC metadata headers:", e)
 
     return client
-
-
 
 
 mcp = FastMCP("weaviate-mcp-http")
@@ -234,32 +233,53 @@ def hybrid_search(
     limit: int = 10,
     alpha: float = 0.5,
     query_properties: Optional[List[str]] = None,
+    return_properties: Optional[List[str]] = None,
+    include_metadata: bool = True,
 ) -> Dict[str, Any]:
+    """
+    Esegue una hybrid search con gli stessi parametri del notebook:
+    - alpha: peso della componente vettoriale (0=BM25, 1=vector)
+    - query_properties: limita BM25 ai campi indicati
+    - return_properties: proprietà da restituire
+    - include_metadata: se True, ritorna score e distance
+    """
     client = _connect()
     try:
         coll = client.collections.get(collection)
         if coll is None:
-            return {"error": f"Collection '{collection}' not found"}
-        kwargs = {"query": query, "alpha": alpha, "limit": limit}
+            return {"error": f"Collection '{collection}' non trovata"}
+
+        kwargs = {
+            "query": query,
+            "alpha": alpha,
+            "limit": limit,
+        }
         if query_properties:
             kwargs["query_properties"] = query_properties
+        if return_properties:
+            kwargs["return_properties"] = return_properties
+        if include_metadata:
+            kwargs["return_metadata"] = MetadataQuery(score=True, distance=True)
+
         resp = coll.query.hybrid(**kwargs)
+
         out = []
         for o in getattr(resp, "objects", []) or []:
+            item = {
+                "uuid": str(getattr(o, "uuid", "")),
+                "properties": getattr(o, "properties", {}),
+            }
             md = getattr(o, "metadata", None)
-            score = getattr(md, "score", None)
-            distance = getattr(md, "distance", None)
-            out.append(
-                {
-                    "uuid": str(getattr(o, "uuid", "")),
-                    "properties": getattr(o, "properties", {}),
-                    "bm25_score": score,
-                    "distance": distance,
-                }
-            )
+            if md:
+                # il notebook usa o.metadata.score come "fusion score"
+                item["score"] = getattr(md, "score", None)
+                item["distance"] = getattr(md, "distance", None)
+            out.append(item)
+
         return {"count": len(out), "results": out}
     finally:
         client.close()
+
 
 
 # ---- Optional: Vertex AI Multimodal Embeddings (client-side) ----
