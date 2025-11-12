@@ -502,18 +502,68 @@ _maybe_start_vertex_oauth_refresher()
 # Patch _connect to inject headers
 _old_connect = _connect
 def _connect():
-    url = _get_weaviate_url()
+    url = _get_weaviate_url()           # NON normalizzare: lascia host/https com'è nella tua env
     key = _get_weaviate_api_key()
-    headers = {}
-    # Prefer static API key header if provided; else use OAuth refreshed headers
-    vertex_key = os.environ.get("VERTEX_APIKEY")
-    if vertex_key:
-        headers["X-Goog-Vertex-Api-Key"] = vertex_key
-    if not vertex_key and _VERTEX_HEADERS:
-        headers.update(_VERTEX_HEADERS)
+
+    # ===== Headers REST =====
+    rest_headers = {}
+
+    # A) API key Vertex statica?
+    vertex_api_key = os.environ.get("VERTEX_APIKEY")
+    if vertex_api_key:
+        for k in ["X-Goog-Vertex-Api-Key", "X-Goog-Api-Key", "X-Palm-Api-Key", "X-Goog-Studio-Api-Key"]:
+            rest_headers[k] = vertex_api_key
+    else:
+        # B) OAuth token "nudo" come in Colab: solo X-Goog-Vertex-Api-Key
+        # (NON mettere Authorization Bearer Google nelle REST verso Weaviate: non necessaria)
+        try:
+            from google.oauth2 import service_account
+            from google.auth.transport.requests import Request
+            # supporta GOOGLE_APPLICATION_CREDENTIALS_JSON
+            gac_json = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+            gac_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+            if gac_json and not gac_path:
+                tmp = "/app/gcp_credentials.json"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    f.write(gac_json)
+                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = tmp
+                gac_path = tmp
+            if gac_path:
+                SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
+                creds = service_account.Credentials.from_service_account_file(gac_path, scopes=SCOPES)
+                creds.refresh(Request())
+                if creds.token:
+                    rest_headers["X-Goog-Vertex-Api-Key"] = creds.token
+        except Exception as _:
+            pass  # se fallisce, continueremo comunque (il lato BM25 funzionerà)
+
+    # ===== Crea client (Auth Weaviate via API key) =====
     client = weaviate.connect_to_weaviate_cloud(
         cluster_url=url,
         auth_credentials=Auth.api_key(key),
-        headers=headers or None,
+        headers=rest_headers or None,   # header REST (non critici)
     )
+
+    # ===== Metadata gRPC: SOLO chiavi Vertex in minuscolo; NON toccare 'authorization' =====
+    grpc_meta_add = {}
+    if vertex_api_key:
+        for k in ["x-goog-vertex-api-key", "x-goog-api-key", "x-palm-api-key", "x-goog-studio-api-key"]:
+            grpc_meta_add[k] = vertex_api_key
+    else:
+        v = rest_headers.get("X-Goog-Vertex-Api-Key")
+        if v:
+            grpc_meta_add["x-goog-vertex-api-key"] = v
+
+    try:
+        conn = getattr(client, "_connection", None)
+        if conn is not None:
+            # aggiorna senza rimuovere nulla, così 'authorization' (WCS API key) resta intatto
+            if hasattr(conn, "grpc_metadata") and isinstance(conn.grpc_metadata, dict):
+                conn.grpc_metadata.update(grpc_meta_add)
+            elif hasattr(conn, "_grpc_metadata") and isinstance(conn._grpc_metadata, dict):
+                conn._grpc_metadata.update(grpc_meta_add)
+    except Exception as e:
+        print("[weaviate] warn: cannot set gRPC metadata headers:", e)
+
     return client
+
