@@ -1,4 +1,5 @@
 # serve.py
+import json
 import os
 from typing import Any, Dict, List, Optional
 
@@ -514,28 +515,38 @@ def _connect():
         for k in ["X-Goog-Vertex-Api-Key", "X-Goog-Api-Key", "X-Palm-Api-Key", "X-Goog-Studio-Api-Key"]:
             rest_headers[k] = vertex_api_key
     else:
-        # B) OAuth token "nudo" come in Colab: solo X-Goog-Vertex-Api-Key
-        # (NON mettere Authorization Bearer Google nelle REST verso Weaviate: non necessaria)
-        try:
-            from google.oauth2 import service_account
-            from google.auth.transport.requests import Request
-            # supporta GOOGLE_APPLICATION_CREDENTIALS_JSON
-            gac_json = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
-            gac_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-            if gac_json and not gac_path:
-                tmp = "/app/gcp_credentials.json"
-                with open(tmp, "w", encoding="utf-8") as f:
-                    f.write(gac_json)
-                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = tmp
-                gac_path = tmp
-            if gac_path:
-                SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
-                creds = service_account.Credentials.from_service_account_file(gac_path, scopes=SCOPES)
-                creds.refresh(Request())
-                if creds.token:
-                    rest_headers["X-Goog-Vertex-Api-Key"] = creds.token
-        except Exception as _:
-            pass  # se fallisce, continueremo comunque (il lato BM25 funzionerà)
+        # B) Token aggiornato dal refresher (se disponibile)
+        headers_from_refresher = {}
+        if _VERTEX_HEADERS:
+            headers_from_refresher = _VERTEX_HEADERS.copy()
+            # Mantieni solo header X-Goog-* per il traffico REST verso Weaviate
+            headers_from_refresher = {
+                k: v for k, v in headers_from_refresher.items() if k.lower().startswith("x-goog-")
+            }
+        if headers_from_refresher:
+            rest_headers.update(headers_from_refresher)
+        else:
+            # C) Fallback: ottieni un token fresco sincrono
+            try:
+                from google.oauth2 import service_account
+                from google.auth.transport.requests import Request
+                # supporta GOOGLE_APPLICATION_CREDENTIALS_JSON
+                gac_json = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+                gac_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+                if gac_json and not gac_path:
+                    tmp = "/app/gcp_credentials.json"
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        f.write(gac_json)
+                    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = tmp
+                    gac_path = tmp
+                if gac_path:
+                    SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
+                    creds = service_account.Credentials.from_service_account_file(gac_path, scopes=SCOPES)
+                    creds.refresh(Request())
+                    if creds.token:
+                        rest_headers["X-Goog-Vertex-Api-Key"] = creds.token
+            except Exception as _:
+                pass  # se fallisce, continueremo comunque (il lato BM25 funzionerà)
 
     # ===== Crea client (Auth Weaviate via API key) =====
     client = weaviate.connect_to_weaviate_cloud(
@@ -550,7 +561,12 @@ def _connect():
         for k in ["x-goog-vertex-api-key", "x-goog-api-key", "x-palm-api-key", "x-goog-studio-api-key"]:
             grpc_meta_add[k] = vertex_api_key
     else:
-        v = rest_headers.get("X-Goog-Vertex-Api-Key")
+        refresher_token = None
+        if _VERTEX_HEADERS:
+            refresher_token = _VERTEX_HEADERS.get("X-Goog-Vertex-Api-Key") or _VERTEX_HEADERS.get(
+                "x-goog-vertex-api-key"
+            )
+        v = refresher_token or rest_headers.get("X-Goog-Vertex-Api-Key")
         if v:
             grpc_meta_add["x-goog-vertex-api-key"] = v
 
