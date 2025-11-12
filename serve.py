@@ -14,6 +14,7 @@ from weaviate.classes.query import MetadataQuery
 # In-memory stato Vertex
 _VERTEX_HEADERS: Dict[str, str] = {}
 _VERTEX_REFRESH_THREAD_STARTED = False
+_VERTEX_USER_PROJECT: Optional[str] = None
 
 
 def _build_vertex_header_map(token: str) -> Dict[str, str]:
@@ -28,6 +29,8 @@ def _build_vertex_header_map(token: str) -> Dict[str, str]:
         "X-Goog-Studio-Api-Key": token,
         "Authorization": f"Bearer {token}",
     }
+    if _VERTEX_USER_PROJECT:
+        headers["X-Goog-User-Project"] = _VERTEX_USER_PROJECT
     return headers
 
 # ---- GCP Project discovery from Service Account or ADC ----
@@ -84,6 +87,7 @@ def _resolve_service_account_path() -> Optional[str]:
     """
     gac_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
     if gac_path and os.path.exists(gac_path):
+        _load_vertex_user_project(gac_path)
         return gac_path
 
     candidates = [
@@ -93,8 +97,23 @@ def _resolve_service_account_path() -> Optional[str]:
     for candidate in candidates:
         if candidate and os.path.exists(candidate):
             os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = candidate
+            _load_vertex_user_project(candidate)
             return candidate
     return None
+
+
+def _load_vertex_user_project(path: str) -> None:
+    global _VERTEX_USER_PROJECT
+    if _VERTEX_USER_PROJECT:
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        _VERTEX_USER_PROJECT = data.get("project_id")
+        if not _VERTEX_USER_PROJECT and data.get("quota_project_id"):
+            _VERTEX_USER_PROJECT = data["quota_project_id"]
+    except Exception as exc:
+        print(f"[vertex-oauth] unable to read project id from SA: {exc}")
 
 
 def _sync_refresh_vertex_token() -> bool:
@@ -377,6 +396,8 @@ def _ensure_gcp_adc():
             f2.write(gac_json)
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = tmp_path
     _resolve_service_account_path()
+    if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+        _load_vertex_user_project(os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
 
 def _vertex_embed(image_b64: Optional[str] = None, text: Optional[str] = None, model: str = "multimodalembedding@001"):
     if not _VERTEX_AVAILABLE:
