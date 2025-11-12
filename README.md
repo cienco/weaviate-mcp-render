@@ -33,3 +33,12 @@ e usa gli strumenti:
 - Per Weaviate Cloud bastano **URL + API key**.
 - Il server ascolta su `0.0.0.0:$PORT` (compatibile Render).
 - Health-check disponibile su `/health`.
+
+## Autenticazione Vertex AI
+
+- Imposta `VERTEX_APIKEY` se vuoi usare una chiave statica (senza refresh).
+- Per OAuth con refresh automatico imposta `VERTEX_USE_OAUTH=true` e fornisci un **service account**:
+  - `GOOGLE_APPLICATION_CREDENTIALS_JSON` con il JSON in chiaro **oppure**
+  - `GOOGLE_APPLICATION_CREDENTIALS` con il path del file **oppure**
+  - `VERTEX_SA_PATH` (default `/etc/secrets/weaviate-sa.json`, ideale su Render).
+- Il token Vertex viene rigenerato ogni ~55 minuti e inserito sia negli header REST (`X-Goog-Vertex-Api-Key`, `Authorization`) sia nei metadata gRPC.

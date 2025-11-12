@@ -1,5 +1,6 @@
 # serve.py
 import os
+import json
 from typing import Any, Dict, List, Optional
 
 from fastmcp import FastMCP
@@ -52,6 +53,29 @@ def _get_weaviate_api_key() -> str:
     if not api_key:
         raise RuntimeError("Please set WEAVIATE_API_KEY.")
     return api_key
+
+
+def _resolve_service_account_path() -> Optional[str]:
+    """
+    Determine and set GOOGLE_APPLICATION_CREDENTIALS if possible.
+    Priority:
+      1. Existing GOOGLE_APPLICATION_CREDENTIALS (if file exists)
+      2. Explicit VERTEX_SA_PATH environment variable
+      3. Default Render secret path /etc/secrets/weaviate-sa.json
+    """
+    gac_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if gac_path and os.path.exists(gac_path):
+        return gac_path
+
+    candidates = [
+        os.environ.get("VERTEX_SA_PATH"),
+        "/etc/secrets/weaviate-sa.json",
+    ]
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = candidate
+            return candidate
+    return None
 
 
 def _connect():
@@ -277,6 +301,7 @@ def _ensure_gcp_adc():
         with open(tmp_path, "w", encoding="utf-8") as f2:
             f2.write(gac_json)
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = tmp_path
+    _resolve_service_account_path()
 
 def _vertex_embed(image_b64: Optional[str] = None, text: Optional[str] = None, model: str = "multimodalembedding@001"):
     if not _VERTEX_AVAILABLE:
@@ -360,13 +385,14 @@ def _write_adc_from_json_env():
         with open(tmp_path, "w", encoding="utf-8") as f2:
             f2.write(gac_json)
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = tmp_path
+    _resolve_service_account_path()
 
 def _refresh_vertex_oauth_loop():
     from google.oauth2 import service_account
     from google.auth.transport.requests import Request
     import datetime, time
     SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
-    cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    cred_path = _resolve_service_account_path()
     if not cred_path or not os.path.exists(cred_path):
         print("[vertex-oauth] GOOGLE_APPLICATION_CREDENTIALS missing; token refresher disabled")
         return
@@ -378,7 +404,9 @@ def _refresh_vertex_oauth_loop():
             token = creds.token
             _VERTEX_HEADERS = {
                 "X-Goog-Vertex-Api-Key": token,
+                "x-goog-vertex-api-key": token,
                 "Authorization": f"Bearer {token}",
+                "authorization": f"Bearer {token}",
             }
             print("[vertex-oauth] 🔄 Vertex token refreshed")
             sleep_s = 55 * 60
@@ -399,32 +427,16 @@ def _maybe_start_vertex_oauth_refresher():
     if os.environ.get("VERTEX_USE_OAUTH", "").lower() not in ("1", "true", "yes"):
         return
     _write_adc_from_json_env()
+    sa_path = _resolve_service_account_path()
+    if not sa_path:
+        print("[vertex-oauth] service account path not found; refresher not started")
+        return
     import threading
     t = threading.Thread(target=_refresh_vertex_oauth_loop, daemon=True)
     t.start()
     _VERTEX_REFRESH_THREAD_STARTED = True
 
 _maybe_start_vertex_oauth_refresher()
-
-# Patch _connect to inject headers
-_old_connect = _connect
-def _connect():
-    url = _get_weaviate_url()
-    key = _get_weaviate_api_key()
-    headers = {}
-    # Prefer static API key header if provided; else use OAuth refreshed headers
-    vertex_key = os.environ.get("VERTEX_APIKEY")
-    if vertex_key:
-        headers["X-Goog-Vertex-Api-Key"] = vertex_key
-    if not vertex_key and _VERTEX_HEADERS:
-        headers.update(_VERTEX_HEADERS)
-    client = weaviate.connect_to_weaviate_cloud(
-        cluster_url=url,
-        auth_credentials=Auth.api_key(key),
-        headers=headers or None,
-    )
-    return client
-
 
 @mcp.tool
 def diagnose_vertex() -> Dict[str, Any]:
@@ -439,7 +451,7 @@ def diagnose_vertex() -> Dict[str, Any]:
         from google.oauth2 import service_account
         from google.auth.transport.requests import Request
         SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
-        gac_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        gac_path = _resolve_service_account_path()
         token_preview = None
         expiry = None
         if gac_path and os.path.exists(gac_path):
