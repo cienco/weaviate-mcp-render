@@ -578,6 +578,34 @@ def image_search_vertex(collection: str, image_b64: str, caption: Optional[str] 
         client.close()
 
 
+@mcp.tool
+def diagnose_vertex() -> Dict[str, Any]:
+    """
+    Report Vertex auth status: project id, whether OAuth refresher is on, header presence, and token expiry sample.
+    """
+    info: Dict[str, Any] = {}
+    info["project_id"] = _discover_gcp_project()
+    info["oauth_enabled"] = os.environ.get("VERTEX_USE_OAUTH", "").lower() in ("1", "true", "yes")
+    info["headers_active"] = bool(_VERTEX_HEADERS) if "_VERTEX_HEADERS" in globals() else False
+    try:
+        from google.oauth2 import service_account
+        from google.auth.transport.requests import Request
+        SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
+        gac_path = _resolve_service_account_path()
+        token_preview = None
+        expiry = None
+        if gac_path and os.path.exists(gac_path):
+            creds = service_account.Credentials.from_service_account_file(gac_path, scopes=SCOPES)
+            creds.refresh(Request())
+            token_preview = (creds.token[:12] + "...") if creds.token else None
+            expiry = getattr(creds, "expiry", None)
+        info["token_sample"] = token_preview
+        info["token_expiry"] = str(expiry) if expiry else None
+    except Exception as e:
+        info["token_error"] = str(e)
+    return info
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "10000"))
     raw_path = os.environ.get("MCP_PATH", "/mcp")
@@ -670,30 +698,3 @@ try:
         )
 except Exception as _route_err:
     print("[mcp] warning: cannot register MCP alias route:", _route_err)
-
-@mcp.tool
-def diagnose_vertex() -> Dict[str, Any]:
-    """
-    Report Vertex auth status: project id, whether OAuth refresher is on, header presence, and token expiry sample.
-    """
-    info: Dict[str, Any] = {}
-    info["project_id"] = _discover_gcp_project()
-    info["oauth_enabled"] = os.environ.get("VERTEX_USE_OAUTH", "").lower() in ("1", "true", "yes")
-    info["headers_active"] = bool(_VERTEX_HEADERS) if "_VERTEX_HEADERS" in globals() else False
-    try:
-        from google.oauth2 import service_account
-        from google.auth.transport.requests import Request
-        SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
-        gac_path = _resolve_service_account_path()
-        token_preview = None
-        expiry = None
-        if gac_path and os.path.exists(gac_path):
-            creds = service_account.Credentials.from_service_account_file(gac_path, scopes=SCOPES)
-            creds.refresh(Request())
-            token_preview = (creds.token[:12] + "...") if creds.token else None
-            expiry = getattr(creds, "expiry", None)
-        info["token_sample"] = token_preview
-        info["token_expiry"] = str(expiry) if expiry else None
-    except Exception as e:
-        info["token_error"] = str(e)
-    return info
