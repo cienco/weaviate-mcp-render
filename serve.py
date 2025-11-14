@@ -232,6 +232,11 @@ def _connect():
             auth = _VERTEX_HEADERS.get("Authorization") or _VERTEX_HEADERS.get("authorization")
             if auth:
                 grpc_meta["authorization"] = auth
+    
+    # 2) OpenAI per text2vec-openai in Weaviate
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    if openai_key:
+        headers["X-OpenAI-Api-Key"] = openai_key
 
     # Scrivi nei campi interni compatibili con le varie minor del client (forza assegnazione)
     try:
