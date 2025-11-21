@@ -663,40 +663,22 @@ def hybrid_search(
         coll = client.collections.get(collection)
         if coll is None:
             return {"error": f"Collection '{collection}' not found"}
-        # Se c'è un'immagine, prova prima con near_image (come in image_search_vertex)
-        # Se non supportato, usa near_vector con embedding generato
+        # Se c'è un'immagine, genera l'embedding e passa il vettore a hybrid()
+        # hybrid() accetta 'vector' (array di embedding), non 'near_image' o 'near_vector'
         if image_b64:
-            # Prova prima con near_image - Weaviate gestisce l'embedding automaticamente
-            try:
-                hybrid_params = {
-                    "query": query if query else "",
-                    "alpha": alpha,
-                    "limit": limit,
-                    "return_properties": ["name", "source_pdf", "page_index", "mediaType"],
-                    "return_metadata": MetadataQuery(score=True, distance=True),
-                }
-                # Prova a usare near_image come parametro (se supportato)
-                hybrid_params["near_image"] = image_b64
-                if query_properties:
-                    hybrid_params["query_properties"] = query_properties
-                resp = coll.query.hybrid(**hybrid_params)
-            except (TypeError, AttributeError, ValueError) as e:
-                # Se near_image non è supportato, genera embedding e usa near_vector
-                print(f"[hybrid_search] near_image not supported, using near_vector: {e}")
-                vec = _vertex_embed(image_b64=image_b64, text=query if query else None)
-                hybrid_params = {
-                    "query": query if query else "",
-                    "alpha": alpha,
-                    "limit": limit,
-                    "return_properties": ["name", "source_pdf", "page_index", "mediaType"],
-                    "return_metadata": MetadataQuery(score=True, distance=True),
-                }
-                # Usa near_vector con target_vector
-                hybrid_params["near_vector"] = vec
-                hybrid_params["target_vector"] = "multi_vector"
-                if query_properties:
-                    hybrid_params["query_properties"] = query_properties
-                resp = coll.query.hybrid(**hybrid_params)
+            # Genera l'embedding dell'immagine (e opzionalmente del testo)
+            vec = _vertex_embed(image_b64=image_b64, text=query if query else None)
+            hybrid_params = {
+                "query": query if query else "",
+                "alpha": alpha,
+                "limit": limit,
+                "vector": vec,  # Passa il vettore di embedding direttamente
+                "return_properties": ["name", "source_pdf", "page_index", "mediaType"],
+                "return_metadata": MetadataQuery(score=True, distance=True),
+            }
+            if query_properties:
+                hybrid_params["query_properties"] = query_properties
+            resp = coll.query.hybrid(**hybrid_params)
         else:
             # Solo testo, nessuna immagine
             hybrid_params = {
