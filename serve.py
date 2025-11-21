@@ -603,8 +603,9 @@ def image_search_vertex(collection: str, image_b64: str, caption: Optional[str] 
         if coll is None:
             return {"error": f"Collection '{collection}' not found"}
         # Usa near_image() come su Colab - Weaviate gestisce tutto internamente
+        # Il primo parametro è posizionale (base64 string), non keyword
         resp = coll.query.near_image(
-            image=image_b64,
+            image_b64,
             limit=limit,
             return_properties=["name", "source_pdf", "page_index", "mediaType"],
             return_metadata=MetadataQuery(distance=True),
