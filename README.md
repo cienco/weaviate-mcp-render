@@ -26,7 +26,28 @@ e usa gli strumenti:
 - `get_schema(collection)`
 - `keyword_search(collection, query, limit)`
 - `semantic_search(collection, query, limit)`
-- `hybrid_search(collection, query, alpha, limit, query_properties)`
+- `hybrid_search(collection, query, alpha, limit, query_properties, image_id, image_url, image_b64)`
+- `upload_image(image_url, image_path, image_b64)` - Carica un'immagine e restituisce un `image_id` da usare in `hybrid_search` o `image_search_vertex`
+- `image_search_vertex(collection, image_id, image_url, image_b64, caption, limit)` - Ricerca vettoriale per immagini
+
+## Upload Immagini
+
+Il server supporta l'upload di immagini in due modi:
+
+1. **Tool MCP `upload_image`**: Accetta `image_url` (preferito), `image_path` (file locale sul server), o `image_b64`. Restituisce un `image_id` valido per 1 ora.
+
+2. **Endpoint HTTP `POST /upload-image`**: Per upload diretto di file binari senza conversione base64:
+   - Accetta `multipart/form-data` con campo `image` (file binario)
+   - Oppure JSON con `image_b64`
+   - Restituisce `{"image_id": "...", "expires_in": 3600}`
+   
+   Esempio con curl:
+   ```bash
+   curl -X POST https://<service>.onrender.com/upload-image \
+     -F "image=@/path/to/image.jpg"
+   ```
+
+L'`image_id` restituito può essere usato in `hybrid_search` o `image_search_vertex` per evitare di dover passare l'immagine ogni volta.
 
 ## Note
 

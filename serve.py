@@ -453,17 +453,58 @@ def check_connection() -> Dict[str, Any]:
 
 
 @mcp.tool
-def upload_image(image_b64: str) -> Dict[str, Any]:
+def upload_image(image_url: Optional[str] = None, image_b64: Optional[str] = None, image_path: Optional[str] = None) -> Dict[str, Any]:
     """
-    Carica un'immagine in base64 e restituisce un ID temporaneo da usare in hybrid_search.
-    L'immagine viene validata e pulita. L'ID è valido per 1 ora.
+    Carica un'immagine da URL, file path locale, o base64 e restituisce un ID temporaneo da usare in hybrid_search o image_search_vertex.
+    
+    IMPORTANTE: 
+    - Se hai un URL dell'immagine, passa image_url - il server scaricherà e convertirà automaticamente.
+    - Se hai un file path locale sul server, passa image_path - il server leggerà il file direttamente.
+    - Evita image_b64 se possibile, perché richiede conversione manuale che può essere lenta.
+    
+    L'immagine viene validata e pulita automaticamente. L'ID restituito è valido per 1 ora.
+    
+    Esempi:
+    - upload_image(image_url="https://example.com/image.jpg") -> {"image_id": "uuid-here"}
+    - upload_image(image_path="/path/to/image.jpg") -> {"image_id": "uuid-here"}
+    - upload_image(image_b64="iVBORw0KGgoAAAANS...") -> {"image_id": "uuid-here"}
+    
+    NOTA: Se hai un file sul client (non sul server), usa l'endpoint HTTP POST /upload-image con multipart/form-data
+    invece di questo tool, per evitare di dover convertire in base64.
     """
     global _UPLOADED_IMAGES
     
-    # Pulisci e valida il base64
-    cleaned_b64 = _clean_base64(image_b64)
-    if not cleaned_b64:
-        return {"error": "Invalid base64 image string. Please provide a valid base64-encoded image."}
+    cleaned_b64 = None
+    
+    if image_path:
+        # Carica l'immagine da file path locale
+        print(f"[upload_image] Loading image from path: {image_path}")
+        try:
+            import os
+            if not os.path.exists(image_path):
+                return {"error": f"File not found: {image_path}"}
+            with open(image_path, "rb") as f:
+                import base64
+                file_bytes = f.read()
+                image_b64_raw = base64.b64encode(file_bytes).decode('utf-8')
+                cleaned_b64 = _clean_base64(image_b64_raw)
+        except Exception as e:
+            return {"error": f"Failed to load image from path {image_path}: {str(e)}"}
+        if not cleaned_b64:
+            return {"error": f"Invalid image file: {image_path}"}
+    elif image_url:
+        # Carica l'immagine dall'URL
+        print(f"[upload_image] Loading image from URL: {image_url}")
+        cleaned_b64 = _load_image_from_url(image_url)
+        if not cleaned_b64:
+            return {"error": f"Failed to load image from URL: {image_url}"}
+    elif image_b64:
+        # Pulisci e valida il base64
+        cleaned_b64 = _clean_base64(image_b64)
+        if not cleaned_b64:
+            return {"error": "Invalid base64 image string. Please provide a valid base64-encoded image."}
+    else:
+        return {"error": "Either image_url, image_path, or image_b64 must be provided"}
     
     # Genera un ID univoco
     image_id = str(uuid.uuid4())
