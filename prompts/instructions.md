@@ -21,9 +21,6 @@ REGOLE GENERALI
     commessa_code oppure commessa_name
 - Se l’utente non specifica la commessa, cerca globalmente.
 
-====================================================================
-QUANDO FARE UNA DIAGNOSTICA
-====================================================================
 
 Esegui list_collections e get_schema solo se:
 - non sai se la collection esiste

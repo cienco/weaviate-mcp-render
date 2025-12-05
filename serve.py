@@ -1,6 +1,8 @@
 # serve.py
 import os
 import json
+import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -16,6 +18,9 @@ from weaviate.classes.query import MetadataQuery
 _VERTEX_HEADERS: Dict[str, str] = {}
 _VERTEX_REFRESH_THREAD_STARTED = False
 _VERTEX_USER_PROJECT: Optional[str] = None
+
+# In-memory storage per immagini caricate (temporaneo, scade dopo 1 ora)
+_UPLOADED_IMAGES: Dict[str, Dict[str, Any]] = {}
 
 _BASE_DIR = Path(__file__).resolve().parent
 _DEFAULT_PROMPT_PATH = _BASE_DIR / "prompts" / "instructions.md"
@@ -331,6 +336,70 @@ async def health(_request):
     return JSONResponse({"status": "ok", "service": "weaviate-mcp-http"})
 
 
+@mcp.custom_route("/upload-image", methods=["POST"])
+async def upload_image_endpoint(request):
+    """
+    Endpoint HTTP per upload diretto di immagini.
+    Accetta multipart/form-data con campo 'image' o JSON con 'image_b64'.
+    Restituisce image_id da usare in hybrid_search o image_search_vertex.
+    """
+    try:
+        content_type = request.headers.get("content-type", "")
+        image_b64 = None
+        
+        if "multipart/form-data" in content_type:
+            # Upload multipart (file diretto)
+            form = await request.form()
+            if "image" not in form:
+                return JSONResponse({"error": "Missing 'image' field in form data"}, status_code=400)
+            
+            file = form["image"]
+            if hasattr(file, "read"):
+                # File upload
+                import base64
+                file_bytes = await file.read()
+                image_b64 = base64.b64encode(file_bytes).decode('utf-8')
+            else:
+                return JSONResponse({"error": "Invalid file upload"}, status_code=400)
+        else:
+            # JSON con base64
+            try:
+                data = await request.json()
+                image_b64 = data.get("image_b64")
+                if not image_b64:
+                    return JSONResponse({"error": "Missing 'image_b64' in JSON body"}, status_code=400)
+            except Exception:
+                return JSONResponse({"error": "Invalid request format. Use multipart/form-data with 'image' field or JSON with 'image_b64'"}, status_code=400)
+        
+        if not image_b64:
+            return JSONResponse({"error": "No image data provided"}, status_code=400)
+        
+        # Pulisci e valida il base64
+        cleaned_b64 = _clean_base64(image_b64)
+        if not cleaned_b64:
+            return JSONResponse({"error": "Invalid base64 image string"}, status_code=400)
+        
+        # Genera un ID univoco
+        image_id = str(uuid.uuid4())
+        
+        # Salva l'immagine con timestamp di scadenza (1 ora)
+        _UPLOADED_IMAGES[image_id] = {
+            "image_b64": cleaned_b64,
+            "expires_at": time.time() + 3600,  # 1 ora
+        }
+        
+        # Pulisci immagini scadute
+        current_time = time.time()
+        expired_ids = [img_id for img_id, data in _UPLOADED_IMAGES.items() if data["expires_at"] < current_time]
+        for img_id in expired_ids:
+            _UPLOADED_IMAGES.pop(img_id, None)
+        
+        return JSONResponse({"image_id": image_id, "expires_in": 3600})
+    except Exception as e:
+        print(f"[upload-image] error: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @mcp.tool
 def get_instructions() -> Dict[str, Any]:
     """
@@ -381,6 +450,71 @@ def check_connection() -> Dict[str, Any]:
         return {"ready": bool(ready)}
     finally:
         client.close()
+
+
+@mcp.tool
+def upload_image(image_url: Optional[str] = None, image_path: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Carica un'immagine da URL o file path locale e restituisce un ID temporaneo da usare in hybrid_search o image_search_vertex.
+    
+    IMPORTANTE: 
+    - Se hai un URL dell'immagine, passa image_url - il server scaricherà e convertirà automaticamente in base64.
+    - Se hai un file path locale sul server, passa image_path - il server leggerà il file e lo convertirà in base64.
+    
+    L'immagine viene validata e pulita automaticamente. L'ID restituito è valido per 1 ora.
+    La conversione in base64 viene gestita automaticamente dal server - non devi convertire manualmente.
+    
+    Esempi:
+    - upload_image(image_url="https://example.com/image.jpg") -> {"image_id": "uuid-here"}
+    - upload_image(image_path="/path/to/image.jpg") -> {"image_id": "uuid-here"}
+    
+    NOTA: Se hai un file sul client (non sul server), usa l'endpoint HTTP POST /upload-image con multipart/form-data.
+    """
+    global _UPLOADED_IMAGES
+    
+    cleaned_b64 = None
+    
+    if image_path:
+        # Carica l'immagine da file path locale e converte in base64
+        print(f"[upload_image] Loading image from path: {image_path}")
+        try:
+            import os
+            if not os.path.exists(image_path):
+                return {"error": f"File not found: {image_path}"}
+            with open(image_path, "rb") as f:
+                import base64
+                file_bytes = f.read()
+                image_b64_raw = base64.b64encode(file_bytes).decode('utf-8')
+                cleaned_b64 = _clean_base64(image_b64_raw)
+        except Exception as e:
+            return {"error": f"Failed to load image from path {image_path}: {str(e)}"}
+        if not cleaned_b64:
+            return {"error": f"Invalid image file: {image_path}"}
+    elif image_url:
+        # Carica l'immagine dall'URL e converte in base64
+        print(f"[upload_image] Loading image from URL: {image_url}")
+        cleaned_b64 = _load_image_from_url(image_url)
+        if not cleaned_b64:
+            return {"error": f"Failed to load image from URL: {image_url}"}
+    else:
+        return {"error": "Either image_url or image_path must be provided"}
+    
+    # Genera un ID univoco
+    image_id = str(uuid.uuid4())
+    
+    # Salva l'immagine con timestamp di scadenza (1 ora)
+    _UPLOADED_IMAGES[image_id] = {
+        "image_b64": cleaned_b64,
+        "expires_at": time.time() + 3600,  # 1 ora
+    }
+    
+    # Pulisci immagini scadute
+    current_time = time.time()
+    expired_ids = [img_id for img_id, data in _UPLOADED_IMAGES.items() if data["expires_at"] < current_time]
+    for img_id in expired_ids:
+        _UPLOADED_IMAGES.pop(img_id, None)
+    
+    return {"image_id": image_id, "expires_in": 3600}
 
 
 @mcp.tool
@@ -476,18 +610,87 @@ def hybrid_search(
     collection: str,
     query: str,
     limit: int = 10,
-    alpha: float = 0.5,
-    query_properties: Optional[List[str]] = None,
+    alpha: float = 0.8,
+    query_properties: Optional[Any] = None,  # Accetta sia lista che stringa JSON
+    image_id: Optional[str] = None,
+    image_url: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """
+    Hybrid search che supporta sia testo che immagini.
+    Se viene fornita image_id (da upload_image) o image_url, genera l'embedding e lo usa per la parte vettoriale.
+    La conversione in base64 viene gestita automaticamente dal server.
+    Preferisci image_id (più efficiente) > image_url.
+    """
+    # Forza l'uso della collection "Sinde" (come specificato nel prompt)
+    if collection and collection != "Sinde":
+        print(f"[hybrid_search] warning: collection '{collection}' requested, but using 'Sinde' as per instructions")
+        collection = "Sinde"
+    
+    # Gestisci query_properties se arriva come stringa JSON invece di lista
+    if query_properties and isinstance(query_properties, str):
+        try:
+            query_properties = json.loads(query_properties)
+        except (json.JSONDecodeError, TypeError):
+            pass  # Se non è JSON valido, ignora
+    
+    # Variabile interna per base64 (non esposta nello schema MCP)
+    image_b64 = None
+    
+    # Recupera immagine da image_id se fornito (metodo preferito)
+    if image_id:
+        if image_id in _UPLOADED_IMAGES:
+            img_data = _UPLOADED_IMAGES[image_id]
+            if img_data["expires_at"] > time.time():
+                image_b64 = img_data["image_b64"]
+            else:
+                _UPLOADED_IMAGES.pop(image_id, None)
+                return {"error": f"Image ID {image_id} has expired. Please upload the image again."}
+        else:
+            return {"error": f"Image ID {image_id} not found. Please upload the image first using upload_image."}
+    
+    # Carica immagine da URL se fornita e converte in base64 internamente
+    if image_url and not image_b64:
+        image_b64 = _load_image_from_url(image_url)
+        if not image_b64:
+            return {"error": f"Failed to load image from URL: {image_url}"}
+        # Pulisci e valida il base64 caricato da URL
+        image_b64 = _clean_base64(image_b64)
+        if not image_b64:
+            return {"error": f"Invalid image format from URL: {image_url}"}
+    
     client = _connect()
     try:
         coll = client.collections.get(collection)
         if coll is None:
             return {"error": f"Collection '{collection}' not found"}
-        kwargs = {"query": query, "alpha": alpha, "limit": limit}
-        if query_properties:
-            kwargs["query_properties"] = query_properties
-        resp = coll.query.hybrid(**kwargs)
+        # Se c'è un'immagine, genera l'embedding e passa il vettore a hybrid()
+        # hybrid() accetta 'vector' (array di embedding), non 'near_image' o 'near_vector'
+        if image_b64:
+            # Genera l'embedding dell'immagine (e opzionalmente del testo)
+            vec = _vertex_embed(image_b64=image_b64, text=query if query else None)
+            hybrid_params = {
+                "query": query if query else "",
+                "alpha": alpha,
+                "limit": limit,
+                "vector": vec,  # Passa il vettore di embedding direttamente
+                "return_properties": ["name", "source_pdf", "page_index", "mediaType"],
+                "return_metadata": MetadataQuery(score=True, distance=True),
+            }
+            if query_properties:
+                hybrid_params["query_properties"] = query_properties
+            resp = coll.query.hybrid(**hybrid_params)
+        else:
+            # Solo testo, nessuna immagine
+            hybrid_params = {
+                "query": query,
+                "alpha": alpha,
+                "limit": limit,
+                "return_properties": ["name", "source_pdf", "page_index", "mediaType"],
+                "return_metadata": MetadataQuery(score=True, distance=True),
+            }
+            if query_properties:
+                hybrid_params["query_properties"] = query_properties
+            resp = coll.query.hybrid(**hybrid_params)
         out = []
         for o in getattr(resp, "objects", []) or []:
             md = getattr(o, "metadata", None)
@@ -525,6 +728,103 @@ def _ensure_gcp_adc():
     if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
         _load_vertex_user_project(os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
 
+def _load_image_from_url(image_url: str) -> Optional[str]:
+    """
+    Carica un'immagine da URL pubblico e la converte in base64.
+    Valida che sia un formato immagine supportato.
+    """
+    try:
+        import requests
+        import base64
+        response = requests.get(image_url, timeout=30, stream=True)
+        response.raise_for_status()
+        
+        # Verifica content-type
+        content_type = response.headers.get('content-type', '').lower()
+        if not content_type.startswith('image/'):
+            print(f"[image] warning: URL {image_url} does not return an image (content-type: {content_type})")
+            # Non fallire subito, potrebbe essere un'immagine comunque
+        
+        # Limita la dimensione a 10MB per evitare problemi
+        content = response.content
+        if len(content) > 10 * 1024 * 1024:
+            print(f"[image] warning: image from {image_url} is too large ({len(content)} bytes)")
+            return None
+        
+        # Verifica dimensione minima
+        if len(content) < 100:
+            print(f"[image] warning: image from {image_url} is too small ({len(content)} bytes)")
+            return None
+        
+        # Verifica che sia un formato immagine valido (controlla magic bytes)
+        valid_formats = {
+            b'\xff\xd8\xff': 'JPEG',
+            b'\x89PNG\r\n\x1a\n': 'PNG',
+            b'GIF87a': 'GIF',
+            b'GIF89a': 'GIF',
+            b'RIFF': 'WEBP',  # WEBP inizia con RIFF
+        }
+        is_valid = False
+        for magic, fmt in valid_formats.items():
+            if content.startswith(magic):
+                is_valid = True
+                print(f"[image] detected format: {fmt} from {image_url}")
+                break
+        
+        if not is_valid:
+            print(f"[image] warning: {image_url} may not be a valid image format")
+            # Non fallire, prova comunque
+        
+        return base64.b64encode(content).decode('utf-8')
+    except Exception as e:
+        print(f"[image] error loading from URL {image_url}: {e}")
+        return None
+
+def _clean_base64(image_b64: str) -> Optional[str]:
+    """
+    Pulisce e valida un base64 string.
+    Rimuove eventuali prefissi data URL e verifica che sia valido.
+    """
+    import base64
+    import re
+    
+    # Rimuovi eventuali prefissi data URL (data:image/...;base64,)
+    if image_b64.startswith('data:'):
+        match = re.match(r'data:image/[^;]+;base64,(.+)', image_b64)
+        if match:
+            image_b64 = match.group(1)
+        else:
+            return None
+    
+    # Rimuovi spazi bianchi
+    image_b64 = image_b64.strip()
+    
+    # Valida che sia base64 valido
+    try:
+        # Verifica che contenga solo caratteri base64
+        if not re.match(r'^[A-Za-z0-9+/=]+$', image_b64):
+            print(f"[image] invalid base64 characters")
+            return None
+        
+        # Prova a decodificare
+        decoded = base64.b64decode(image_b64, validate=True)
+        
+        # Verifica che non sia vuoto
+        if len(decoded) == 0:
+            print(f"[image] empty image data")
+            return None
+        
+        # Verifica dimensione minima (almeno un byte di header)
+        if len(decoded) < 10:
+            print(f"[image] image too small ({len(decoded)} bytes)")
+            return None
+        
+        return image_b64
+    except Exception as e:
+        print(f"[image] base64 validation error: {e}")
+        return None
+
+
 def _vertex_embed(image_b64: Optional[str] = None, text: Optional[str] = None, model: str = "multimodalembedding@001"):
     if not _VERTEX_AVAILABLE:
         raise RuntimeError("google-cloud-aiplatform not installed")
@@ -537,8 +837,12 @@ def _vertex_embed(image_b64: Optional[str] = None, text: Optional[str] = None, m
     from vertexai.vision_models import MultiModalEmbeddingModel, Image
     mdl = MultiModalEmbeddingModel.from_pretrained(model)
     import base64
-    image = Image.from_bytes(bytes() if not image_b64 else base64.b64decode(image_b64))
-    resp = mdl.get_embeddings(image=image if image_b64 else None, contextual_text=text)
+    # Image accetta bytes nel costruttore
+    image = None
+    if image_b64:
+        image_bytes = base64.b64decode(image_b64)
+        image = Image(image_bytes)
+    resp = mdl.get_embeddings(image=image, contextual_text=text)
     if getattr(resp, "image_embedding", None):
         return list(resp.image_embedding)
     if getattr(resp, "text_embedding", None):
@@ -564,17 +868,57 @@ def insert_image_vertex(collection: str, image_b64: str, caption: Optional[str] 
         client.close()
 
 @mcp.tool
-def image_search_vertex(collection: str, image_b64: str, caption: Optional[str] = None, limit: int = 10) -> Dict[str, Any]:
-    vec = _vertex_embed(image_b64=image_b64, text=caption)
+def image_search_vertex(collection: str, image_id: Optional[str] = None, image_url: Optional[str] = None, caption: Optional[str] = None, limit: int = 10) -> Dict[str, Any]:
+    """
+    Ricerca vettoriale per immagini usando near_image() (come su Colab).
+    Weaviate gestisce automaticamente l'embedding usando il multi2vec configurato.
+    La conversione in base64 viene gestita automaticamente dal server.
+    Preferisci image_id (da upload_image) > image_url.
+    """
+    # Forza l'uso della collection "Sinde" (come specificato nel prompt)
+    if collection and collection != "Sinde":
+        print(f"[image_search_vertex] warning: collection '{collection}' requested, but using 'Sinde' as per instructions")
+        collection = "Sinde"
+    
+    # Variabile interna per base64 (non esposta nello schema MCP)
+    image_b64 = None
+    
+    # Recupera immagine da image_id se fornito (metodo preferito)
+    if image_id:
+        if image_id in _UPLOADED_IMAGES:
+            img_data = _UPLOADED_IMAGES[image_id]
+            if img_data["expires_at"] > time.time():
+                image_b64 = img_data["image_b64"]
+            else:
+                _UPLOADED_IMAGES.pop(image_id, None)
+                return {"error": f"Image ID {image_id} has expired. Please upload the image again."}
+        else:
+            return {"error": f"Image ID {image_id} not found. Please upload the image first using upload_image."}
+    
+    # Carica immagine da URL se fornita e converte in base64 internamente
+    if image_url and not image_b64:
+        image_b64 = _load_image_from_url(image_url)
+        if not image_b64:
+            return {"error": f"Failed to load image from URL: {image_url}"}
+        # Pulisci e valida il base64 caricato da URL
+        image_b64 = _clean_base64(image_b64)
+        if not image_b64:
+            return {"error": f"Invalid image format from URL: {image_url}"}
+    
+    if not image_b64:
+        return {"error": "Either image_id or image_url must be provided"}
+    
     client = _connect()
     try:
         coll = client.collections.get(collection)
         if coll is None:
             return {"error": f"Collection '{collection}' not found"}
-        resp = coll.query.near_vector(
-            near_vector=vec,
+        # Usa near_image() come su Colab - Weaviate gestisce tutto internamente
+        # Il primo parametro è posizionale (base64 string), non keyword
+        resp = coll.query.near_image(
+            image_b64,
             limit=limit,
-            target_vector="image",
+            return_properties=["name", "source_pdf", "page_index", "mediaType"],
             return_metadata=MetadataQuery(distance=True),
         )
         out = []
